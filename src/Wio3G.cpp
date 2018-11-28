@@ -17,6 +17,9 @@
 #define HTTP_POST_USER_AGENT		"QUECTEL_MODULE"
 #define HTTP_POST_CONTENT_TYPE		"application/json"
 
+#define HTTP_POST_STREAM_CONTENT_TYPE	"application/octet-stream"
+#define HTTP_POST_STREAN_BUFFER_LENGTH	(128)
+
 #define LINEAR_SCALE(val, inMin, inMax, outMin, outMax)	(((val) - (inMin)) / ((inMax) - (inMin)) * ((outMax) - (outMin)) + (outMin))
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -784,6 +787,80 @@ bool Wio3G::HttpPost(const char* url, const char* data, int* responseCode)
 	const char* headerStr = header.GetString();
 	_AtSerial.WriteBinary((const byte*)headerStr, strlen(headerStr));
 	_AtSerial.WriteBinary((const byte*)data, strlen(data));
+	if (!_AtSerial.ReadResponse("^OK$", 1000, NULL)) return RET_ERR(false, E_UNKNOWN);
+	if (!_AtSerial.ReadResponse("^\\+QHTTPPOST: (.*)$", 60000, &response)) return RET_ERR(false, E_UNKNOWN);
+	parser.Parse(response.c_str());
+	if (parser.Size() < 1) return RET_ERR(false, E_UNKNOWN);
+	if (strcmp(parser[0], "0") != 0) return RET_ERR(false, E_UNKNOWN);
+	if (parser.Size() < 2) {
+		*responseCode = -1;
+	}
+	else {
+		*responseCode = atoi(parser[1]);
+	}
+
+	return RET_OK(true);
+}
+
+bool Wio3G::HttpPost(const char* url, int contentLength, const Stream* dataStream, int* responseCode)
+{
+	std::string response;
+	ArgumentParser parser;
+
+	if (strncmp(url, "https:", 6) == 0) {
+		if (!_AtSerial.WriteCommandAndReadResponse("AT+QHTTPCFG=\"sslctxid\",1", "^OK$", 500, NULL)) return RET_ERR(false, E_UNKNOWN);
+		if (!_AtSerial.WriteCommandAndReadResponse("AT+QSSLCFG=\"sslversion\",1,4", "^OK$", 500, NULL)) return RET_ERR(false, E_UNKNOWN);
+		if (!_AtSerial.WriteCommandAndReadResponse("AT+QSSLCFG=\"ciphersuite\",1,\"0XFFFF\"", "^OK$", 500, NULL)) return RET_ERR(false, E_UNKNOWN);
+		if (!_AtSerial.WriteCommandAndReadResponse("AT+QSSLCFG=\"seclevel\",1,0", "^OK$", 500, NULL)) return RET_ERR(false, E_UNKNOWN);
+	}
+
+	if (!_AtSerial.WriteCommandAndReadResponse("AT+QHTTPCFG=\"requestheader\",1", "^OK$", 500, NULL)) return RET_ERR(false, E_UNKNOWN);
+
+	if (!HttpSetUrl(url)) return RET_ERR(false, E_UNKNOWN);
+
+	const char* host;
+	int hostLength;
+	const char* uri;
+	int uriLength;
+	if (!SplitUrl(url, &host, &hostLength, &uri, &uriLength)) return RET_ERR(false, E_UNKNOWN);
+
+
+	StringBuilder header;
+	header.Write("POST ");
+	if (uriLength <= 0) {
+		header.Write("/");
+	}
+	else {
+		header.Write(uri, uriLength);
+	}
+	header.Write(" HTTP/1.1\r\n");
+	header.Write("Host: ");
+	header.Write(host, hostLength);
+	header.Write("\r\n");
+	header.Write("Accept: */*\r\n");
+	header.Write("User-Agent: " HTTP_POST_USER_AGENT "\r\n");
+	header.Write("Connection: Keep-Alive\r\n");
+	header.Write("Content-Type: " HTTP_POST_STREAM_CONTENT_TYPE "\r\n");
+	if (!header.WriteFormat("Content-Length: %d\r\n", contentLength)) return RET_ERR(false, E_UNKNOWN);
+	header.Write("\r\n");
+
+	StringBuilder str;
+	if (!str.WriteFormat("AT+QHTTPPOST=%d", header.Length() + strlen(data))) return RET_ERR(false, E_UNKNOWN);
+	_AtSerial.WriteCommand(str.GetString());
+	if (!_AtSerial.ReadResponse("^CONNECT$", 60000, NULL)) return RET_ERR(false, E_UNKNOWN);
+	const char* headerStr = header.GetString();
+	_AtSerial.WriteBinary((const byte*)headerStr, strlen(headerStr));
+
+	unsigned char buffer[HTTP_POST_STREAN_BUFFER_LENGTH];
+	unsigned int count = contentLength / HTTP_POST_STREAN_BUFFER_LENGTH;
+	if ((contentLength % HTTP_POST_STREAN_BUFFER_LENGTH) != 0) count += 1;
+
+	for (unsigned int i = 0; i < count; i++)
+	{
+		size_t readLength = dataStream.readBytes((char *)buffer, HTTP_POST_STREAN_BUFFER_LENGTH);
+		_AtSerial.WriteBinary((const byte*)buffer, readLength);
+	}
+
 	if (!_AtSerial.ReadResponse("^OK$", 1000, NULL)) return RET_ERR(false, E_UNKNOWN);
 	if (!_AtSerial.ReadResponse("^\\+QHTTPPOST: (.*)$", 60000, &response)) return RET_ERR(false, E_UNKNOWN);
 	parser.Parse(response.c_str());
